@@ -11,7 +11,12 @@ const CONFIG_FILE = path.join(DATA_DIR, 'config.csv');
 const SECRETS_FILE = path.join(DATA_DIR, 'secrets.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
-const ENTRY_HEADERS = ['ID', 'Timestamp', 'Type', 'Name', 'Amount', 'Description', 'Status', 'Notes', 'Points'];
+const ENTRY_HEADERS = ['ID', 'Timestamp', 'Name', 'Amount', 'Description', 'Status', 'Notes', 'Points'];
+const STATUSES = ['Received', 'In progress / On hold'];
+
+function normalizeStatus(s) {
+  return STATUSES.includes(s) ? s : 'Received';
+}
 
 // ---------- setup on first run ----------
 
@@ -36,6 +41,45 @@ function ensureDataFiles() {
     fs.writeFileSync(SECRETS_FILE, JSON.stringify({ adminPassword: 'changeme' }, null, 2));
     console.log('\n>>> Created data/secrets.json with default admin password "changeme". Change it before your bar opens! <<<\n');
   }
+}
+
+// One-time migration from the old Donation/Expense schema to the current
+// donations-only schema (Status: Received / In progress / On hold).
+function migrateEntriesIfNeeded() {
+  if (!fs.existsSync(ENTRIES_FILE)) return;
+  const text = fs.readFileSync(ENTRIES_FILE, 'utf8');
+  const rows = parseCsv(text);
+  if (!rows.length || !rows[0].includes('Type')) return;
+
+  const headers = rows[0];
+  const oldEntries = rows.slice(1).map(r => {
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = r[i] !== undefined ? r[i] : ''; });
+    return obj;
+  });
+
+  const migrated = oldEntries.map(e => {
+    let status;
+    if (e.Type === 'Expense') {
+      status = e.Status === 'Reimbursed' ? 'Received' : 'In progress / On hold';
+    } else {
+      status = normalizeStatus(e.Status === 'N/A' ? 'Received' : e.Status);
+    }
+    const points = (e.Points !== undefined && e.Points !== '') ? e.Points : e.Amount;
+    return {
+      ID: e.ID,
+      Timestamp: e.Timestamp,
+      Name: e.Name,
+      Amount: e.Amount,
+      Description: e.Description,
+      Status: status,
+      Notes: e.Notes || '',
+      Points: points
+    };
+  });
+
+  writeCsv(ENTRIES_FILE, ENTRY_HEADERS, migrated);
+  console.log('\n>>> Migrated data/entries.csv to the current format (donations only, Received / In progress-On hold). <<<\n');
 }
 
 // ---------- CSV helpers ----------
@@ -119,25 +163,26 @@ function getAdminPassword() {
 }
 
 function computeTotals(entries) {
-  let totalDonations = 0, totalReimbursed = 0, totalPending = 0, totalPoints = 0;
+  let totalReceived = 0, totalInProgress = 0, totalPoints = 0;
   entries.forEach(e => {
     const amt = Number(e.Amount) || 0;
-    if (e.Type === 'Donation') {
-      totalDonations += amt;
+    if (e.Status === 'Received') {
+      totalReceived += amt;
       totalPoints += Number(e.Points) || 0;
-    } else if (e.Type === 'Expense') {
-      if (e.Status === 'Reimbursed') totalReimbursed += amt;
-      else totalPending += amt;
+    } else {
+      totalInProgress += amt;
     }
   });
-  return { totalDonations, totalReimbursed, totalPending, totalPoints, balance: totalDonations - totalReimbursed };
+  return { totalReceived, totalInProgress, totalPoints };
 }
 
+// Only confirmed (Received) donations count toward the leaderboard, so
+// pledges that never come through don't inflate anyone's point total.
 function getLeaderboard() {
   const entries = getEntries();
   const map = new Map();
   entries.forEach(e => {
-    if (e.Type !== 'Donation') return;
+    if (e.Status !== 'Received') return;
     const name = (e.Name || '').trim() || 'Anonymous';
     const points = e.Points !== undefined && e.Points !== '' ? Number(e.Points) : Number(e.Amount) || 0;
     const amount = Number(e.Amount) || 0;
@@ -275,7 +320,7 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === '/api/public-config' && req.method === 'GET') {
     const config = getConfigMap();
-    config.totalRaised = computeTotals(getEntries()).totalDonations;
+    config.totalRaised = computeTotals(getEntries()).totalReceived;
     return sendJson(res, 200, config);
   }
 
@@ -312,7 +357,7 @@ async function handleApi(req, res, pathname) {
   if (pathname === '/api/admin/data' && req.method === 'GET') {
     const entries = getEntries().slice().reverse();
     const config = getConfigMap();
-    config.totalRaised = computeTotals(getEntries()).totalDonations;
+    config.totalRaised = computeTotals(getEntries()).totalReceived;
     return sendJson(res, 200, { entries, totals: computeTotals(getEntries()), config, leaderboard: getLeaderboard() });
   }
 
@@ -320,39 +365,53 @@ async function handleApi(req, res, pathname) {
     const body = await readJsonBody(req);
     const amount = Number(body.amount);
     if (!body.name || !amount || amount <= 0) return sendJson(res, 400, { error: 'Name and a positive amount are required.' });
-    const type = body.type === 'Expense' ? 'Expense' : 'Donation';
-    let points = 0;
-    if (type === 'Donation') {
-      points = (body.points !== undefined && body.points !== null && body.points !== '') ? Number(body.points) : amount;
-      if (!Number.isFinite(points) || points < 0) points = amount;
-    }
+    let points = (body.points !== undefined && body.points !== null && body.points !== '') ? Number(body.points) : amount;
+    if (!Number.isFinite(points) || points < 0) points = amount;
     const entries = getEntries();
     entries.push({
       ID: crypto.randomUUID(),
       Timestamp: new Date().toISOString(),
-      Type: type,
       Name: body.name,
       Amount: amount,
       Description: body.description || '',
-      Status: type === 'Expense' ? 'Pending' : 'N/A',
+      Status: normalizeStatus(body.status),
       Notes: body.notes || '',
-      Points: type === 'Donation' ? points : ''
+      Points: points
     });
     saveEntries(entries);
     return sendJson(res, 200, { ok: true });
   }
 
-  const reimburseMatch = pathname.match(/^\/api\/admin\/entries\/([^/]+)\/reimburse$/);
-  if (reimburseMatch && req.method === 'POST') {
+  const receiveMatch = pathname.match(/^\/api\/admin\/entries\/([^/]+)\/receive$/);
+  if (receiveMatch && req.method === 'POST') {
     const entries = getEntries();
-    const entry = entries.find(e => e.ID === reimburseMatch[1]);
-    if (entry) { entry.Status = 'Reimbursed'; saveEntries(entries); }
+    const entry = entries.find(e => e.ID === receiveMatch[1]);
+    if (entry) { entry.Status = 'Received'; saveEntries(entries); }
     return sendJson(res, 200, { ok: true });
   }
 
-  const deleteMatch = pathname.match(/^\/api\/admin\/entries\/([^/]+)$/);
-  if (deleteMatch && req.method === 'DELETE') {
-    const entries = getEntries().filter(e => e.ID !== deleteMatch[1]);
+  const idMatch = pathname.match(/^\/api\/admin\/entries\/([^/]+)$/);
+
+  if (idMatch && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const amount = Number(body.amount);
+    if (!body.name || !amount || amount <= 0) return sendJson(res, 400, { error: 'Name and a positive amount are required.' });
+    const entries = getEntries();
+    const entry = entries.find(e => e.ID === idMatch[1]);
+    if (!entry) return sendJson(res, 404, { error: 'Entry not found.' });
+    let points = (body.points !== undefined && body.points !== null && body.points !== '') ? Number(body.points) : amount;
+    if (!Number.isFinite(points) || points < 0) points = amount;
+    entry.Name = body.name;
+    entry.Amount = amount;
+    entry.Description = body.description || '';
+    entry.Status = normalizeStatus(body.status);
+    entry.Points = points;
+    saveEntries(entries);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (idMatch && req.method === 'DELETE') {
+    const entries = getEntries().filter(e => e.ID !== idMatch[1]);
     saveEntries(entries);
     return sendJson(res, 200, { ok: true });
   }
@@ -381,6 +440,7 @@ const server = http.createServer((req, res) => {
 });
 
 ensureDataFiles();
+migrateEntriesIfNeeded();
 
 server.listen(PORT, () => {
   const nets = os.networkInterfaces();

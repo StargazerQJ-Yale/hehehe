@@ -1,2 +1,2 @@
-ID,Timestamp,Type,Name,Amount,Description,Status,Notes,Points
-1a0d83c8-d572-4b6b-9ef8-a7e1bbe085c3,2026-07-18T19:25:52.426Z,Donation,jane doe,111,,N/A,,111
+ID,Timestamp,Name,Amount,Description,Status,Notes,Points
+1a0d83c8-d572-4b6b-9ef8-a7e1bbe085c3,2026-07-18T19:25:52.426Z,jane doe,111,,Received,,111

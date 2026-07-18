@@ -2,6 +2,7 @@
   let STATE = null;
   let activeTab = 'log';
   let pointsTouched = false;
+  let editingEntry = null;
 
   function escapeHtml(str) {
     const div = document.createElement('div');
@@ -79,10 +80,8 @@
         '<button class="secondary" type="button" style="flex:1;margin-top:0;" data-action="logout">Log out</button>' +
       '</div>' +
       '<div class="row card">' +
-        '<div class="stat"><div class="value">' + formatMoney(t.totalDonations) + '</div><div class="label">Raised</div></div>' +
-        '<div class="stat"><div class="value">' + formatMoney(t.totalReimbursed) + '</div><div class="label">Reimbursed</div></div>' +
-        '<div class="stat"><div class="value">' + formatMoney(t.totalPending) + '</div><div class="label">Pending</div></div>' +
-        '<div class="stat"><div class="value">' + formatMoney(t.balance) + '</div><div class="label">Balance</div></div>' +
+        '<div class="stat"><div class="value">' + formatMoney(t.totalReceived) + '</div><div class="label">Received</div></div>' +
+        '<div class="stat"><div class="value">' + formatMoney(t.totalInProgress) + '</div><div class="label">In progress / On hold</div></div>' +
         '<div class="stat"><div class="value">' + Math.round(t.totalPoints) + '</div><div class="label">Points awarded</div></div>' +
       '</div>' +
       '<div class="tabs">' +
@@ -100,6 +99,7 @@
   }
 
   function setTab(id) {
+    editingEntry = null;
     activeTab = id;
     renderDashboard();
   }
@@ -116,64 +116,63 @@
 
   function ledgerHtml() {
     if (!STATE.entries.length) {
-      return '<div class="card"><p class="muted">No entries yet. Add a donation or expense from the "Add entry" tab.</p></div>';
+      return '<div class="card"><p class="muted">No entries yet. Add a donation from the "Add entry" tab.</p></div>';
     }
     const rows = STATE.entries.map(function (e) {
-      const isExpense = e.Type === 'Expense';
-      const statusBadge = isExpense
-        ? '<span class="badge ' + (e.Status === 'Reimbursed' ? 'paid' : 'pending') + '">' + escapeHtml(e.Status) + '</span>'
-        : '';
-      const pointsCell = isExpense ? '—' : '<span class="points-cell">' + Math.round(Number(e.Points) || 0) + ' pts</span>';
-      const actions = (isExpense && e.Status !== 'Reimbursed')
-        ? '<button class="secondary" type="button" style="margin:0;padding:4px 10px;font-size:0.78rem;" data-action="mark-reimbursed" data-id="' + escapeHtml(e.ID) + '">Mark paid</button>'
+      const received = e.Status === 'Received';
+      const statusBadge = '<span class="badge ' + (received ? 'paid' : 'pending') + '">' + escapeHtml(e.Status) + '</span>';
+      const pointsCell = '<span class="points-cell">' + Math.round(Number(e.Points) || 0) + ' pts</span>';
+      const receiveAction = !received
+        ? '<button class="secondary" type="button" style="margin:0;padding:4px 10px;font-size:0.78rem;" data-action="mark-received" data-id="' + escapeHtml(e.ID) + '">Mark received</button>'
         : '';
       return '<tr>' +
         '<td>' + formatDate(e.Timestamp) + '</td>' +
-        '<td>' + (e.Type === 'Donation' ? 'Donation' : 'Expense') + '</td>' +
         '<td>' + escapeHtml(e.Name) + '</td>' +
         '<td>' + escapeHtml(e.Description) + '</td>' +
-        '<td>' + (e.Type === 'Donation' ? '+' : '-') + formatMoney(e.Amount) + '</td>' +
+        '<td>' + formatMoney(e.Amount) + '</td>' +
         '<td>' + pointsCell + '</td>' +
         '<td>' + statusBadge + '</td>' +
-        '<td>' + actions + ' <button class="danger" type="button" style="margin:0;padding:4px 10px;font-size:0.78rem;" data-action="delete-entry" data-id="' + escapeHtml(e.ID) + '">Delete</button></td>' +
+        '<td style="white-space:nowrap;">' +
+          '<button class="secondary" type="button" style="margin:0;padding:4px 10px;font-size:0.78rem;" data-action="edit-entry" data-id="' + escapeHtml(e.ID) + '">Edit</button> ' +
+          receiveAction + ' ' +
+          '<button class="danger" type="button" style="margin:0;padding:4px 10px;font-size:0.78rem;" data-action="delete-entry" data-id="' + escapeHtml(e.ID) + '">Delete</button>' +
+        '</td>' +
       '</tr>';
     }).join('');
     return '<div class="card" style="overflow-x:auto;">' +
-      '<table><thead><tr><th>Date</th><th>Type</th><th>Name</th><th>What for</th><th>Amount</th><th>Points</th><th>Status</th><th></th></tr></thead>' +
+      '<table><thead><tr><th>Date</th><th>Name</th><th>Note</th><th>Amount</th><th>Points</th><th>Status</th><th></th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div>';
   }
 
   // ---------- add entry ----------
 
   function addEntryHtml() {
-    pointsTouched = false;
+    const e = editingEntry;
+    pointsTouched = !!e;
+    const status = e ? e.Status : 'Received';
     return '<div class="card">' +
-      '<label>Type</label>' +
-      '<select id="entryType">' +
-        '<option value="Donation">Donation received</option>' +
-        '<option value="Expense">Expense to reimburse</option>' +
-      '</select>' +
-      '<label id="nameLabel">Donor name</label>' +
-      '<input id="entryName" placeholder="e.g. Jane Doe">' +
+      (e ? '<h2 style="margin-top:0;">Editing entry</h2>' : '') +
+      '<label>Donor name</label>' +
+      '<input id="entryName" placeholder="e.g. Jane Doe" value="' + escapeHtml(e ? e.Name : '') + '">' +
       '<label>Amount</label>' +
-      '<input id="entryAmount" type="number" step="0.01" min="0" placeholder="0.00">' +
+      '<input id="entryAmount" type="number" step="0.01" min="0" placeholder="0.00" value="' + (e ? escapeHtml(e.Amount) : '') + '">' +
+      '<label>Status</label>' +
+      '<select id="entryStatus">' +
+        '<option value="Received"' + (status === 'Received' ? ' selected' : '') + '>Received</option>' +
+        '<option value="In progress / On hold"' + (status === 'In progress / On hold' ? ' selected' : '') + '>In progress / On hold</option>' +
+      '</select>' +
       '<div id="pointsField">' +
         '<label>Chancellery points to award <span class="muted">(defaults to $1 = 1pt, editable)</span></label>' +
-        '<input id="entryPoints" type="number" step="1" min="0" placeholder="0">' +
+        '<input id="entryPoints" type="number" step="1" min="0" placeholder="0" value="' + (e ? escapeHtml(e.Points) : '') + '">' +
       '</div>' +
-      '<label id="descLabel">Note (optional)</label>' +
-      '<input id="entryDesc" placeholder="e.g. general donation">' +
+      '<label>Note (optional)</label>' +
+      '<input id="entryDesc" placeholder="e.g. general donation" value="' + escapeHtml(e ? e.Description : '') + '">' +
       '<div id="entryError" class="error"></div>' +
-      '<button type="button" data-action="submit-entry">Save entry</button>' +
+      '<div class="row">' +
+        '<button type="button" data-action="submit-entry">' + (e ? 'Update entry' : 'Save entry') + '</button>' +
+        (e ? '<button type="button" class="secondary" data-action="cancel-edit">Cancel</button>' : '') +
+      '</div>' +
     '</div>';
-  }
-
-  function toggleEntryLabels() {
-    const type = document.getElementById('entryType').value;
-    document.getElementById('nameLabel').textContent = type === 'Expense' ? 'Member name (who spent it)' : 'Donor name';
-    document.getElementById('descLabel').textContent = type === 'Expense' ? 'What was it for?' : 'Note (optional)';
-    document.getElementById('entryDesc').placeholder = type === 'Expense' ? 'e.g. tournament registration fee' : 'e.g. general donation';
-    document.getElementById('pointsField').style.display = type === 'Expense' ? 'none' : 'block';
   }
 
   function syncPointsFromAmount() {
@@ -183,23 +182,39 @@
   }
 
   function submitEntry() {
-    const type = document.getElementById('entryType').value;
     const entry = {
-      type: type,
       name: document.getElementById('entryName').value.trim(),
       amount: document.getElementById('entryAmount').value,
-      description: document.getElementById('entryDesc').value.trim()
+      description: document.getElementById('entryDesc').value.trim(),
+      status: document.getElementById('entryStatus').value,
+      points: document.getElementById('entryPoints').value
     };
-    if (type === 'Donation') entry.points = document.getElementById('entryPoints').value;
     document.getElementById('entryError').textContent = '';
-    api('/api/admin/entries', { method: 'POST', body: JSON.stringify(entry) })
-      .then(function () { return loadAndRenderDashboard(); })
+    const request = editingEntry
+      ? api('/api/admin/entries/' + encodeURIComponent(editingEntry.ID), { method: 'PUT', body: JSON.stringify(entry) })
+      : api('/api/admin/entries', { method: 'POST', body: JSON.stringify(entry) });
+    request
+      .then(function () { editingEntry = null; return loadAndRenderDashboard(); })
       .then(function () { activeTab = 'log'; renderDashboard(); })
       .catch(function (err) { document.getElementById('entryError').textContent = err.message; });
   }
 
-  function markReimbursed(id) {
-    api('/api/admin/entries/' + encodeURIComponent(id) + '/reimburse', { method: 'POST' })
+  function editEntry(id) {
+    const entry = STATE.entries.find(function (e) { return e.ID === id; });
+    if (!entry) return;
+    editingEntry = entry;
+    activeTab = 'add';
+    renderDashboard();
+  }
+
+  function cancelEdit() {
+    editingEntry = null;
+    activeTab = 'log';
+    renderDashboard();
+  }
+
+  function markReceived(id) {
+    api('/api/admin/entries/' + encodeURIComponent(id) + '/receive', { method: 'POST' })
       .then(function () { return loadAndRenderDashboard(); });
   }
 
@@ -277,13 +292,11 @@
     else if ((el = e.target.closest('[data-action="logout"]'))) logout();
     else if ((el = e.target.closest('[data-action="set-tab"]'))) setTab(el.getAttribute('data-tab'));
     else if ((el = e.target.closest('[data-action="submit-entry"]'))) submitEntry();
-    else if ((el = e.target.closest('[data-action="mark-reimbursed"]'))) markReimbursed(el.getAttribute('data-id'));
+    else if ((el = e.target.closest('[data-action="edit-entry"]'))) editEntry(el.getAttribute('data-id'));
+    else if ((el = e.target.closest('[data-action="cancel-edit"]'))) cancelEdit();
+    else if ((el = e.target.closest('[data-action="mark-received"]'))) markReceived(el.getAttribute('data-id'));
     else if ((el = e.target.closest('[data-action="delete-entry"]'))) deleteEntry(el.getAttribute('data-id'));
     else if ((el = e.target.closest('[data-action="save-settings"]'))) saveSettings();
-  });
-
-  document.body.addEventListener('change', function (e) {
-    if (e.target.id === 'entryType') toggleEntryLabels();
   });
 
   document.body.addEventListener('input', function (e) {
