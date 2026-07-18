@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+  <div class="wrap">
+    <div id="app">
+      <p class="muted">Loading...</p>
+    </div>
+  </div>
+
+  <script>
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str == null ? '' : String(str);
+      return div.innerHTML;
+    }
+
+    function formatMoney(n) {
+      const num = Number(n) || 0;
+      return '$' + num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function render(config) {
+      const showTotal = String(config.ShowTotal).toLowerCase() !== 'false';
+      const app = document.getElementById('app');
+      app.innerHTML =
+        '<h1>' + escapeHtml(config.ClubName || 'Our Debate Club') + '</h1>' +
+        '<p class="muted">' + escapeHtml(config.Message || '') + '</p>' +
+        (showTotal ? (
+          '<div class="card stat">' +
+            '<div class="value">' + formatMoney(config.totalRaised) + '</div>' +
+            '<div class="label">Raised so far</div>' +
+          '</div>'
+        ) : '') +
+        '<div class="card">' +
+          '<h2>Donate</h2>' +
+          '<div class="info-line">' +
+            '<span>Venmo</span>' +
+            '<span><strong>' + escapeHtml(config.Venmo || '') + '</strong> ' +
+              '<button class="copy-btn" onclick="copyText(' + JSON.stringify(config.Venmo || '') + ', this)">Copy</button></span>' +
+          '</div>' +
+          '<div class="info-line">' +
+            '<span>Zelle</span>' +
+            '<span><strong>' + escapeHtml(config.Zelle || '') + '</strong> ' +
+              '<button class="copy-btn" onclick="copyText(' + JSON.stringify(config.Zelle || '') + ', this)">Copy</button></span>' +
+          '</div>' +
+          '<p class="muted" style="margin-top:14px;font-size:0.85rem;">All donations go directly toward tournament fees, travel, and materials. Thank you for your support!</p>' +
+        '</div>';
+    }
+
+    function copyText(text, btn) {
+      navigator.clipboard.writeText(text).then(function () {
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = original; }, 1200);
+      });
+    }
+
+    google.script.run
+      .withSuccessHandler(render)
+      .withFailureHandler(function (err) {
+        document.getElementById('app').innerHTML = '<p class="error">Could not load page: ' + escapeHtml(err.message) + '</p>';
+      })
+      .getPublicConfig();
+  </script>
+</body>
+</html>

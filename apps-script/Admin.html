@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+  <div class="wrap">
+    <div id="app"></div>
+  </div>
+
+  <script>
+    let PASSWORD = sessionStorage.getItem('fundAdminPassword') || '';
+    let STATE = null;
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str == null ? '' : String(str);
+      return div.innerHTML;
+    }
+
+    function formatMoney(n) {
+      const num = Number(n) || 0;
+      return '$' + num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function formatDate(d) {
+      const date = new Date(d);
+      if (isNaN(date.getTime())) return '';
+      return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    function runServer(fn) {
+      return new Promise(function (resolve, reject) {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(reject)[fn].apply(null, Array.prototype.slice.call(arguments, 1));
+      });
+    }
+
+    function renderLogin(errorMsg) {
+      document.getElementById('app').innerHTML =
+        '<h1>Fund Admin</h1>' +
+        '<div class="card">' +
+          '<label for="pw">Admin password</label>' +
+          '<input id="pw" type="password" placeholder="Enter password">' +
+          (errorMsg ? '<p class="error">' + escapeHtml(errorMsg) + '</p>' : '') +
+          '<button onclick="doLogin()">Log in</button>' +
+        '</div>';
+      document.getElementById('pw').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') doLogin();
+      });
+      document.getElementById('pw').focus();
+    }
+
+    function doLogin() {
+      const pw = document.getElementById('pw').value;
+      runServer('adminGetData', pw).then(function (data) {
+        PASSWORD = pw;
+        sessionStorage.setItem('fundAdminPassword', pw);
+        STATE = data;
+        renderDashboard();
+      }).catch(function (err) {
+        renderLogin(err.message);
+      });
+    }
+
+    function refresh() {
+      return runServer('adminGetData', PASSWORD).then(function (data) {
+        STATE = data;
+        renderDashboard();
+      });
+    }
+
+    let activeTab = 'log';
+
+    function renderDashboard() {
+      const t = STATE.totals;
+      const app = document.getElementById('app');
+      app.innerHTML =
+        '<h1>' + escapeHtml(STATE.config.ClubName || 'Fund Admin') + '</h1>' +
+        '<div class="row card">' +
+          '<div class="stat"><div class="value">' + formatMoney(t.totalDonations) + '</div><div class="label">Raised</div></div>' +
+          '<div class="stat"><div class="value">' + formatMoney(t.totalReimbursed) + '</div><div class="label">Reimbursed</div></div>' +
+          '<div class="stat"><div class="value">' + formatMoney(t.totalPending) + '</div><div class="label">Pending</div></div>' +
+          '<div class="stat"><div class="value">' + formatMoney(t.balance) + '</div><div class="label">Balance</div></div>' +
+        '</div>' +
+        '<div class="tabs">' +
+          tabBtn('log', 'Ledger') +
+          tabBtn('add', 'Add entry') +
+          tabBtn('settings', 'Settings') +
+        '</div>' +
+        '<div id="tabContent"></div>';
+      renderTab();
+    }
+
+    function tabBtn(id, label) {
+      return '<button class="' + (activeTab === id ? '' : 'inactive') + '" onclick="setTab(\'' + id + '\')">' + label + '</button>';
+    }
+
+    function setTab(id) {
+      activeTab = id;
+      renderDashboard();
+    }
+
+    function renderTab() {
+      const el = document.getElementById('tabContent');
+      if (activeTab === 'log') el.innerHTML = ledgerHtml();
+      else if (activeTab === 'add') el.innerHTML = addEntryHtml();
+      else el.innerHTML = settingsHtml();
+    }
+
+    function ledgerHtml() {
+      if (!STATE.entries.length) {
+        return '<div class="card"><p class="muted">No entries yet. Add a donation or expense from the "Add entry" tab.</p></div>';
+      }
+      const rows = STATE.entries.map(function (e) {
+        const isExpense = e.Type === 'Expense';
+        const statusBadge = isExpense
+          ? '<span class="badge ' + (e.Status === 'Reimbursed' ? 'paid' : 'pending') + '">' + escapeHtml(e.Status) + '</span>'
+          : '';
+        const actions = (isExpense && e.Status !== 'Reimbursed')
+          ? '<button class="secondary" style="margin:0;padding:4px 10px;font-size:0.78rem;" onclick="markReimbursed(' + JSON.stringify(e.ID) + ')">Mark paid</button>'
+          : '';
+        return '<tr>' +
+          '<td>' + formatDate(e.Timestamp) + '</td>' +
+          '<td>' + (e.Type === 'Donation' ? 'Donation' : 'Expense') + '</td>' +
+          '<td>' + escapeHtml(e.Name) + '</td>' +
+          '<td>' + escapeHtml(e.Description) + '</td>' +
+          '<td>' + (e.Type === 'Donation' ? '+' : '-') + formatMoney(e.Amount) + '</td>' +
+          '<td>' + statusBadge + '</td>' +
+          '<td>' + actions + ' <button class="danger" style="margin:0;padding:4px 10px;font-size:0.78rem;" onclick="deleteEntry(' + JSON.stringify(e.ID) + ')">Delete</button></td>' +
+        '</tr>';
+      }).join('');
+      return '<div class="card" style="overflow-x:auto;">' +
+        '<table><thead><tr><th>Date</th><th>Type</th><th>Name</th><th>What for</th><th>Amount</th><th>Status</th><th></th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table></div>';
+    }
+
+    function addEntryHtml() {
+      return '<div class="card">' +
+        '<label>Type</label>' +
+        '<select id="entryType" onchange="toggleEntryLabels()">' +
+          '<option value="Donation">Donation received</option>' +
+          '<option value="Expense">Expense to reimburse</option>' +
+        '</select>' +
+        '<label id="nameLabel">Donor name</label>' +
+        '<input id="entryName" placeholder="e.g. Jane Doe">' +
+        '<label>Amount</label>' +
+        '<input id="entryAmount" type="number" step="0.01" min="0" placeholder="0.00">' +
+        '<label id="descLabel">Note (optional)</label>' +
+        '<input id="entryDesc" placeholder="e.g. general donation">' +
+        '<div id="entryError" class="error"></div>' +
+        '<button onclick="submitEntry()">Save entry</button>' +
+      '</div>';
+    }
+
+    function toggleEntryLabels() {
+      const type = document.getElementById('entryType').value;
+      document.getElementById('nameLabel').textContent = type === 'Expense' ? 'Member name (who spent it)' : 'Donor name';
+      document.getElementById('descLabel').textContent = type === 'Expense' ? 'What was it for?' : 'Note (optional)';
+      document.getElementById('entryDesc').placeholder = type === 'Expense' ? 'e.g. tournament registration fee' : 'e.g. general donation';
+    }
+
+    function submitEntry() {
+      const entry = {
+        type: document.getElementById('entryType').value,
+        name: document.getElementById('entryName').value.trim(),
+        amount: document.getElementById('entryAmount').value,
+        description: document.getElementById('entryDesc').value.trim()
+      };
+      document.getElementById('entryError').textContent = '';
+      runServer('adminAddEntry', PASSWORD, entry).then(function (data) {
+        STATE = data;
+        activeTab = 'log';
+        renderDashboard();
+      }).catch(function (err) {
+        document.getElementById('entryError').textContent = err.message;
+      });
+    }
+
+    function markReimbursed(id) {
+      runServer('adminMarkReimbursed', PASSWORD, id).then(function (data) {
+        STATE = data;
+        renderTab();
+      });
+    }
+
+    function deleteEntry(id) {
+      if (!confirm('Delete this entry? This cannot be undone.')) return;
+      runServer('adminDeleteEntry', PASSWORD, id).then(function (data) {
+        STATE = data;
+        renderTab();
+      });
+    }
+
+    function settingsHtml() {
+      const c = STATE.config;
+      return '<div class="card">' +
+        '<label>Club name</label>' +
+        '<input id="cfgName" value="' + escapeHtml(c.ClubName || '') + '">' +
+        '<label>Venmo</label>' +
+        '<input id="cfgVenmo" value="' + escapeHtml(c.Venmo || '') + '">' +
+        '<label>Zelle</label>' +
+        '<input id="cfgZelle" value="' + escapeHtml(c.Zelle || '') + '">' +
+        '<label>Message shown on donate page</label>' +
+        '<textarea id="cfgMessage" rows="3">' + escapeHtml(c.Message || '') + '</textarea>' +
+        '<label><input type="checkbox" id="cfgShowTotal" style="width:auto;display:inline-block;" ' + (String(c.ShowTotal).toLowerCase() !== 'false' ? 'checked' : '') + '> Show total raised on public page</label>' +
+        '<div id="cfgError" class="error"></div>' +
+        '<button onclick="saveSettings()">Save settings</button>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h2>Public donate page</h2>' +
+        '<p class="muted" style="font-size:0.85rem;">Share this link with donors:</p>' +
+        '<input readonly value="' + escapeHtml(getPublicUrl()) + '" onclick="this.select()">' +
+      '</div>';
+    }
+
+    function getPublicUrl() {
+      return window.location.href.split('?')[0];
+    }
+
+    function saveSettings() {
+      const config = {
+        ClubName: document.getElementById('cfgName').value.trim(),
+        Venmo: document.getElementById('cfgVenmo').value.trim(),
+        Zelle: document.getElementById('cfgZelle').value.trim(),
+        Message: document.getElementById('cfgMessage').value.trim(),
+        ShowTotal: document.getElementById('cfgShowTotal').checked ? 'true' : 'false'
+      };
+      document.getElementById('cfgError').textContent = '';
+      runServer('adminUpdateConfig', PASSWORD, config).then(function () {
+        return refresh();
+      }).catch(function (err) {
+        document.getElementById('cfgError').textContent = err.message;
+      });
+    }
+
+    if (PASSWORD) {
+      runServer('adminGetData', PASSWORD).then(function (data) {
+        STATE = data;
+        renderDashboard();
+      }).catch(function () {
+        sessionStorage.removeItem('fundAdminPassword');
+        renderLogin();
+      });
+    } else {
+      renderLogin();
+    }
+  </script>
+</body>
+</html>
